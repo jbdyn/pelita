@@ -118,170 +118,192 @@ def distribute_food(all_tiles, chamber_tiles, trapped_food, total_food, rng=None
     return tf_pos | ff_pos | leftover_food_pos
 
 
-def add_wall_and_split(partition, walls, ngaps, vertical, rng=None):
+class Partition:
+    # partition for binary space partitioning
+
+    def __init__(self, pmin, pmax, vertical, rng=None):
+        # minimum and maximum coordinates
+        self.xmin, self.ymin = pmin
+        self.xmax, self.ymax = pmax
+
+        # wall orientation
+        self.vertical = vertical
+
+        # random number generator for later use in splitting
+        self.rng = default_rng(rng)
+
+        # choose wall position range depending on its orientation
+        pos_min, pos_max = (
+            (self.xmin, self.xmax) if vertical else
+            (self.ymin, self.ymax)
+        )
+
+        # the offset from the left and right partition wall
+        padding = 2
+
+        # sample wall position
+        self.pos = self.rng.randint(pos_min + padding, pos_max - padding)
+
+    @property
+    def pmin(self):
+        # top left partition point
+        return (self.xmin, self.ymin)
+
+    @property
+    def pmax(self):
+        # bottom right partition point
+        return (self.xmax, self.ymax)
+
+    @property
+    def wmin(self):
+        # top/left wall point
+        return (
+            (self.pos, self.ymin) if self.vertical else
+            (self.xmin, self.pos)
+        )
+
+    @property
+    def wmax(self):
+        # bottom/right wall point
+        return (
+            (self.pos, self.ymax) if self.vertical else
+            (self.xmax, self.pos)
+        )
+
+    @property
+    def width(self):
+        # partition width
+        return self.xmax - self.xmin + 1
+
+    @property
+    def height(self):
+        # partition height
+        return self.ymax - self.ymin + 1
+
+    @property
+    def length(self):
+        # splittable length
+        return self.width if self.vertical else self.height
+
+    @property
+    def wall(self):
+        # all wall points
+        if self.vertical:
+            return [(self.pos, y) for y in range(self.ymin, self.ymax + 1)]
+        else:
+            return [(x, self.pos) for x in range(self.xmin, self.xmax + 1)]
+
+    def split(self):
+        # split the current partition into two inscribed ones
+        children = list()
+        cls = type(self)
+
+        for pmin, pmax in (
+            # top/left child partition
+            (self.pmin, self.wmax),
+            # bottom/right child partition
+            (self.wmin, self.pmax),
+        ):
+            try:
+                # rotate wall orientation for the next partition level
+                child = cls(pmin, pmax, not self.vertical, rng=self.rng)
+            except ValueError:
+                # the wall position range is illegal
+                pass
+            else:
+                # the child partition initialized well, so add it
+                children.append(child)
+
+        return children
+
+
+def sample_wall(wall, walls, ngaps, rng=None):
+    # choose wall points with respect to partition entrances
+
+    rng = default_rng(rng)
+
+    # avoid blocked entrances by removing additional wall points if needed
+    start = 2 if wall[0] not in walls else 1
+    end = -2 if wall[-1] not in walls else -1
+
+    wall = wall[start:end]
+
+    # cap the sample size accordingly
+    return rng.sample(wall, k=max(0, len(wall) - ngaps))
+
+
+def add_walls(partition, walls, ngaps, rng=None):
+    # use binary space partitioning
+
     rng = default_rng(rng)
 
     # copy to avoid side effects
     walls = walls.copy()
 
-    # store partitions in an expanding list
-    # alongside the number of gaps in wall and its orientation
-    partitions = [partition + (ngaps, vertical)]
+    # store partitions in an expanding list with the number of gaps in the wall
+    partitions = [(partition, ngaps)]
 
-    # The loop is always exiting, since the position of the walls
-    # `pos` is in `[xmin + 1, xmax - (xmin + 1)]` or
-    # in `[ymin + 1, ymax - (ymin + 1)]`, respectively, and thus always
-    # yielding partitions smaller than the current partition.
-    # The checks for `height < 3`, `width < 3` and
-    # `partition_length < rng.randint(3, 5)` ensure no further addition of
-    # partitions, and `partitions.pop()` ensures that the list of partitions
-    # is always drained.
-    #
-    # So, partitions always shrink, no new partitions are added once they
-    # shrank below a threshold, and the loop draines the list in
-    # every iteration.
+    # The loop is always exiting, since partitions always shrink,
+    # no new partitions are added once they shrank below a threshold and
+    # the loop draines the list in every iteration
     while len(partitions) > 0:
-        # get the next partition of any is available
-        (xmin, ymin), (xmax, ymax), ngaps, vertical = partitions.pop()
+        # get the next partition
+        partition, ngaps = partitions.pop()
 
-        # the size of the maze partition we work on
-        width = xmax - xmin + 1
-        height = ymax - ymin + 1
-
-        # if the partition is too small, move on with the next one
-        if height < 3 and width < 3:
+        # adjust the padding around a partition's inner wall;
+        # the higher the upper bound, the more spacious the chambers are
+        if partition.length < rng.randrange(5, 7):
             continue
 
-        # insert a wall only if there is some space in the around it in the
-        # orthogonal direction, i.e.:
-        # if the wall is vertical, then the relevant length is the width
-        # if the wall is horizontal, then the relevant length is the height,
-        # otherwise move on with the next one
-        partition_length = width if vertical else height
-        if partition_length < rng.randint(3, 5):
-            continue
+        # split the current partition
+        children = partition.split()
 
-        # the row/column to put the horizontal/vertical wall on
-        # the position is calculated starting from the left/top of the maze partition
-        # and then a random offset is added -> the resulting raw/column must not
-        # exceed the available length
-        pos = xmin if vertical else ymin
-        pos += rng.randint(1, partition_length - 2)
+        # add children with the adjusted number of wall gaps to the buffer;
+        # the higher the lower gap bound, the more are the walls detached
+        partitions.extend((child, max(1, ngaps // 2)) for child in children)
 
-        # define the two new partitions of the maze generated by this wall
-        # these are the parts of the maze to the left/right of a vertical wall
-        # or the top/bottom of a horizontal wall
-        if vertical:
-            new = (
-                # right
-                ((pos + 1, ymin), (xmax, ymax)),
-                # left
-                ((xmin, ymin), (pos - 1, ymax)),
-            )
-        else:
-            new = (
-                # bottom
-                ((xmin, pos + 1), (xmax, ymax)),
-                # top
-                ((xmin, ymin), (xmax, pos - 1)),
-            )
-
-        # queue the new partitions next, appending the left/top one last;
-        # ensures maze stability
-        for partition in new:
-            partitions.append((*partition, max(1, ngaps // 2), not vertical))
-
-        # the maximum length of the wall is the space we have in the same direction
-        # of the wall in the partition, i.e.
-        # if the wall is vertical, the maximum length is the height
-        # if the wall is horizontal, the maximum length is the width
-        max_length = height if vertical else width
-
-        # We can start with a full wall, but we want to make sure that we do not
-        # block the entrances to this partition. The entrances are
-        # - the tile before the beginning of this wall [entrance] and
-        # - the tile after the end of this wall [exit]
-        # if entrance or exit are _not_ walls, then the wall must leave the neighboring
-        # tiles also empty, i.e. the wall must be shortened accordingly
-        if vertical:
-            entrance_before = (pos, ymin - 1)
-            entrance_after = (pos, ymin + max_length)
-            begin = 0 if entrance_before in walls else 1
-            end = max_length if entrance_after in walls else max_length - 1
-            wall = {(pos, ymin + y) for y in range(begin, end)}
-        else:
-            entrance_before = (xmin - 1, pos)
-            entrance_after = (xmin + max_length, pos)
-            begin = 0 if entrance_before in walls else 1
-            end = max_length if entrance_after in walls else max_length - 1
-            wall = {(xmin + x, pos) for x in range(begin, end)}
-
-        # place the requested number of gaps in the otherwise full wall
-        # these gaps are indices in the direction of the wall, i.e.
-        # x if horizontal and y if vertical
-        # TODO: when we drop compatibility with numpy, this can be more easily done
-        # by just sampling ngaps out of the full wall set, i.e.
-        # gaps = rng.sample(wall, k=ngaps)
-        # for gap in gaps:
-        #     wall.remove(gap)
-        ngaps = max(1, ngaps)
-        wall_pos = list(range(max_length))
-        rng.shuffle(wall_pos)
-
-        for gap in wall_pos[:ngaps]:
-            if vertical:
-                wall.discard((pos, ymin + gap))
-            else:
-                wall.discard((xmin + gap, pos))
-
-        # collect this wall into the global wall set
-        walls |= wall
+        # collect the current partition's wall into the global wall set
+        wall = sample_wall(partition.wall, walls, ngaps, rng=rng)
+        walls |= set(wall)
 
     return walls
 
 
 def generate_half_maze(width, height, ngaps_center, bots_pos, rng=None):
-    # use binary space partitioning
     rng = default_rng(rng)
 
-    # outer walls are top, bottom, left and right edge
+    # outer walls of the full maze: top, bottom, left and right
     walls = {(x, 0) for x in range(width)} | \
             {(x, height-1) for x in range(width)} | \
             {(0, y) for y in range(height)} | \
             {(width-1, y) for y in range(height)}
 
-    # Generate a wall with gaps at the border between the two homezones
-    # in the left side of the maze
+    # generate a border on the left maze side by sampling the upper half and
+    # mirroring that to the lower half
+    #
+    # the border is located on the right edge of the left maze side
+    pos = width // 2 - 1
 
-    # TODO: when we decide to break backward compatibility with the numpy version
-    # of create maze, this part can be delegated directly to generate_walls and
-    # then we need to rewrite mirror to mirror a set of coordinates around the center
-    # by discarding the lower part of the border
+    # sample the upper y-coordinates
+    ys = rng.sample(range(height // 2), k=(height - ngaps_center) // 2)
 
-    # Let us start with a full wall at the left side of the border
-    x_wall = width//2 - 1
-    wall = {(x_wall, y) for y in range(1, height - 1)}
+    # mirror the y-coordinates to the lower half
+    ys += [height - 1 - y for y in ys]
 
-    # possible locations for gaps
-    # these gaps need to be symmetric around the center
-    # TODO: when we decide to break compatibility with the numpy version of
-    # create_maze we can rewrite this. See generate_walls for an example
-    ymax = (height - 2) // 2
-    candidates = list(range(ymax))
-    rng.shuffle(candidates)
+    # add the border walls to the maze edges
+    border = set((pos, y) for y in ys)
+    walls |= border
 
-    for gap in candidates[:ngaps_center//2]:
-        wall.remove((x_wall, gap+1))
-        wall.remove((x_wall, ymax*2 - gap))
+    # prepare left maze side as partition
+    pmin = (0, 0)
+    pmax = (pos, height - 1)
+    partition = Partition(pmin, pmax, vertical=False, rng=rng)
 
-    walls |= wall
-    partition = ((1, 1), (x_wall - 1, ymax * 2))
-
-    walls = add_wall_and_split(
+    # add inner walls to the left maze side
+    walls = add_walls(
         partition,
         walls,
         ngaps_center // 2,
-        vertical=False,
         rng=rng,
     )
 
